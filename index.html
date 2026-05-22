@@ -154,8 +154,8 @@
     <button class="modal-close" onclick="closeSettings()">×</button>
     <p class="modal-title">⚙ API設定</p>
     <div class="field">
-      <label>Replicate APIトークン（画像生成）</label>
-      <input type="password" id="replicateKey" placeholder="r8_..." />
+      <label>Stability AI APIキー（画像生成）</label>
+      <input type="password" id="stabilityKey" placeholder="sk-..." />
     </div>
     <div class="field mt-8">
       <label>Claude APIキー（項目分析）</label>
@@ -401,13 +401,13 @@ function selectStyle(value, url) {
 function openSettings() { document.getElementById('settingsModal').classList.add('active'); loadSettings(); }
 function closeSettings() { document.getElementById('settingsModal').classList.remove('active'); }
 function loadSettings() {
-  document.getElementById('replicateKey').value = localStorage.getItem('replicateKey') || '';
+  document.getElementById('stabilityKey').value = localStorage.getItem('stabilityKey') || '';
   document.getElementById('claudeKey').value = localStorage.getItem('claudeKey') || '';
   document.getElementById('sheetsId').value = localStorage.getItem('sheetsId') || '';
   document.getElementById('sheetsKey').value = localStorage.getItem('sheetsKey') || '';
 }
 function saveSettings() {
-  localStorage.setItem('replicateKey', document.getElementById('replicateKey').value.trim());
+  localStorage.setItem('stabilityKey', document.getElementById('stabilityKey').value.trim());
   localStorage.setItem('claudeKey', document.getElementById('claudeKey').value.trim());
   localStorage.setItem('sheetsId', document.getElementById('sheetsId').value.trim());
   localStorage.setItem('sheetsKey', document.getElementById('sheetsKey').value.trim());
@@ -489,8 +489,8 @@ function showToast(msg) {
 }
 
 async function generateImage(extraInstruction = '') {
-  const replicateKey = getKey('replicateKey');
-  if (!replicateKey) { openSettings(); return; }
+  const stabilityKey = getKey('stabilityKey');
+  if (!stabilityKey) { openSettings(); return; }
   state.styleMemo = document.getElementById('styleMemo').value.trim();
   goTo(3);
   document.getElementById('beforeImg').src = state.photoDataUrl;
@@ -499,71 +499,60 @@ async function generateImage(extraInstruction = '') {
   document.getElementById('step3ErrorBanner').style.display = 'none';
   document.getElementById('saveImgBtn').disabled = true;
 
-  showLoading('Replicate で画像生成中...');
+  showLoading('Stability AI で画像生成中...');
   try {
-    const styleText = state.selectedStyle || 'モダン';
-    const basePrompt = `Interior room after renovation. Style: ${styleText}. Keep the same room layout and structure. Transform walls, floors, fixtures, and lighting to match the renovation style. Photorealistic, high quality.${state.styleMemo ? ' ' + state.styleMemo : ''}`;
-    const prompt = extraInstruction ? basePrompt + ` Additional changes: ${extraInstruction}` : basePrompt;
+    const styleText = state.selectedStyle || 'modern';
+    const styleMap = { 'モダン':'modern interior', 'ナチュラル':'natural wood interior', '和風':'japanese style interior', '北欧':'scandinavian interior', 'シンプル':'simple minimal interior', '高級感':'luxury interior' };
+    const styleName = styleMap[styleText] || styleText;
+    const basePrompt = `${styleName}, renovated room, after renovation, high quality, photorealistic, architectural photography${state.styleMemo ? ', ' + state.styleMemo : ''}`;
+    const prompt = extraInstruction ? basePrompt + ', ' + extraInstruction : basePrompt;
+    const negPrompt = 'ugly, blurry, low quality, distorted, deformed, text, watermark';
 
-    // Replicate API: flux-dev img2img
-    const initRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-dev/predictions', {
+    // base64→Blob変換
+    const byteString = atob(state.photoBase64);
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+    for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+    const blob = new Blob([ab], { type: state.photoMimeType });
+
+    const formData = new FormData();
+    formData.append('image', blob, 'photo.jpg');
+    formData.append('prompt', prompt);
+    formData.append('negative_prompt', negPrompt);
+    formData.append('strength', '0.75');
+    formData.append('output_format', 'jpeg');
+
+    const res = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${replicateKey}`,
-        'Prefer': 'wait'
+        'Authorization': `Bearer ${stabilityKey}`,
+        'Accept': 'image/*'
       },
-      body: JSON.stringify({
-        input: {
-          prompt,
-          image: state.photoDataUrl,
-          prompt_strength: 0.75,
-          num_inference_steps: 28,
-          guidance: 3.5,
-          output_format: 'jpg'
-        }
-      })
+      body: formData
     });
 
-    const prediction = await initRes.json();
-
-    if (prediction.error) throw new Error(prediction.error);
-
-    // ポーリング（Prefer:waitで完了待ち、それでも未完の場合）
-    let result = prediction;
-    let attempts = 0;
-    while (result.status !== 'succeeded' && result.status !== 'failed' && attempts < 30) {
-      await new Promise(r => setTimeout(r, 2000));
-      const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${result.id}`, {
-        headers: { 'Authorization': `Bearer ${replicateKey}` }
-      });
-      result = await pollRes.json();
-      attempts++;
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(errText || `HTTPエラー: ${res.status}`);
     }
 
-    if (result.status === 'failed') throw new Error(result.error || '生成に失敗しました');
+    const imgBlob = await res.blob();
+    const imgUrl = URL.createObjectURL(imgBlob);
+    state.generatedImageUrl = imgUrl;
 
-    const outputUrl = result.output?.[0] || result.output;
-    if (!outputUrl) throw new Error('画像URLが取得できませんでした');
-
-    state.generatedImageUrl = outputUrl;
     // base64変換（Claude分析用）
-    try {
-      const imgRes = await fetch(outputUrl);
-      const blob = await imgRes.blob();
-      const reader = new FileReader();
-      reader.onload = e => { state.generatedImageBase64 = e.target.result.split(',')[1]; };
-      reader.readAsDataURL(blob);
-    } catch(_) { state.generatedImageBase64 = null; }
+    const reader = new FileReader();
+    reader.onload = e => { state.generatedImageBase64 = e.target.result.split(',')[1]; };
+    reader.readAsDataURL(imgBlob);
 
-    document.getElementById('afterImg').src = outputUrl;
+    document.getElementById('afterImg').src = imgUrl;
     document.getElementById('afterImg').style.display = 'block';
     document.getElementById('afterPlaceholder').style.display = 'none';
     document.getElementById('saveImgBtn').disabled = false;
 
   } catch (err) {
     const banner = document.getElementById('step3ErrorBanner');
-    banner.innerHTML = `<div class="error-banner">エラー：${err.message}<br><small>APIトークンを確認してください（⚙ボタン）</small></div>`;
+    banner.innerHTML = `<div class="error-banner">エラー：${err.message}<br><small>APIキーを確認してください（⚙ボタン）</small></div>`;
     banner.style.display = 'block';
   } finally { hideLoading(); }
 }
