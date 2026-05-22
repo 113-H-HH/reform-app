@@ -519,6 +519,7 @@ async function generateImage(extraInstruction = '') {
     formData.append('image', blob, 'photo.jpg');
     formData.append('prompt', prompt);
     formData.append('negative_prompt', negPrompt);
+    formData.append('mode', 'image-to-image');
     formData.append('strength', '0.75');
     formData.append('output_format', 'jpeg');
 
